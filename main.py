@@ -29,9 +29,11 @@ EPSG_WGS84 = 4326
 
 app = FastAPI(title="AgroSentinel Soil Segmentation API", version="1.1")
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # en prod: restreindre à l'origine de ton front
+    allow_origins=["*"],          # en prod: ['https://ton-site.fr']
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -338,6 +340,27 @@ def debug_files():
                     "crs": str(src.crs),
                     "bounds_wgs84": [minlon, minlat, maxlon, maxlat],
                     "bands": src.count
+                })
+        except Exception as e:
+            out.append({"path": p, "error": str(e)})
+    return {
+        "DATA_DIR": os.environ.get("DATA_DIR", "data"),
+        "count": len(paths),
+        "files": out
+    }
+@app.get("/api/debug/files")
+def debug_files():
+    paths = list_tifs()
+    out = []
+    for p in paths:
+        try:
+            with rasterio.open(p) as src:
+                minlon, minlat, maxlon, maxlat = bounds_wgs84(src)
+                out.append({
+                    "path": p,
+                    "crs": str(src.crs),
+                    "bounds_wgs84": [minlon, minlat, maxlon, maxlat],
+                    "bands": src.count,
                 })
         except Exception as e:
             out.append({"path": p, "error": str(e)})
