@@ -1,0 +1,6 @@
+*.tif
+*.tiff
+*.img
+*.vrt
+agrisentinel-api/data/*
+!agrisentinel-api/data/.gitkeep
