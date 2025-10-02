@@ -27,7 +27,7 @@ from sklearn.cluster import KMeans
 DATA_DIR = os.environ.get("DATA_DIR", "data")   # dossier des .tif
 EPSG_WGS84 = 4326
 
-app = FastAPI(title="AgroSentinel Soil Segmentation API", version="1.0")
+app = FastAPI(title="AgroSentinel Soil Segmentation API", version="1.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,8 +57,21 @@ class StatusResp(BaseModel):
 # Utilitaires
 # =========================================================
 def list_tifs() -> List[str]:
-    return sorted(glob.glob(os.path.join(DATA_DIR, "*.tif"))) + \
-           sorted(glob.glob(os.path.join(DATA_DIR, "*.tiff")))
+    """
+    Liste les GeoTIFF présents dans DATA_DIR (non récursif).
+    -> Décommente la version récursive si tes fichiers sont dans des sous-dossiers.
+    """
+    # --- NON récursif (par défaut) ---
+    files = sorted(glob.glob(os.path.join(DATA_DIR, "*.tif"))) + \
+            sorted(glob.glob(os.path.join(DATA_DIR, "*.tiff")))
+    return files
+
+    # --- Récursif (optionnel) ---
+    # patterns = ["**/*.tif", "**/*.tiff"]
+    # files = []
+    # for p in patterns:
+    #     files += glob.glob(os.path.join(DATA_DIR, p), recursive=True)
+    # return sorted(files)
 
 def bounds_wgs84(src) -> Tuple[float, float, float, float]:
     """Retourne (min_lon, min_lat, max_lon, max_lat) des bounds du raster en WGS84."""
@@ -84,6 +97,19 @@ def find_tif_for_point(lat: float, lng: float) -> Optional[str]:
 
 def read_band(src, band_index: int, out_shape: Tuple[int, int]):
     return src.read(band_index, out_shape=out_shape, resampling=Resampling.bilinear).astype("float64")
+
+def read_band_safe(src, band_index: int, out_shape: Tuple[int, int]):
+    try:
+        return read_band(src, band_index, out_shape)
+    except Exception as e:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Impossible de lire la bande index={band_index}. "
+                f"Vérifie que le GeoTIFF contient les bandes attendues (B2=2, B3=3, B4=4, B8=8, B11=11). "
+                f"Erreur interne: {e}"
+            )
+        )
 
 def normalize01(arr: np.ndarray) -> np.ndarray:
     arr = arr.astype("float64")
@@ -127,15 +153,14 @@ def run_segmentation_on_tif(tif_path: str, lat: float, lng: float, radius_km: fl
 
         # Indices Sentinel-2 classiques
         # B2 (blue)=2, B3 (green)=3, B4 (red)=4, B8 (NIR)=8, B11 (SWIR)=11
-        blue = read_band(src, 2, out_shape)
-        green = read_band(src, 3, out_shape)
-        red = read_band(src, 4, out_shape)
-        nir = read_band(src, 8, out_shape)
-        swir = read_band(src, 11, out_shape)
+        blue  = read_band_safe(src, 2, out_shape)
+        green = read_band_safe(src, 3, out_shape)
+        red   = read_band_safe(src, 4, out_shape)
+        nir   = read_band_safe(src, 8, out_shape)
+        swir  = read_band_safe(src, 11, out_shape)
 
         transform_affine = src.transform
         crs = src.crs
-        bounds = src.bounds
 
     # 2) Buffer autour du point (dans le CRS du raster)
     point_wgs = gpd.GeoDataFrame(geometry=[Point(lng, lat)], crs=f"EPSG:{EPSG_WGS84}")
@@ -180,7 +205,6 @@ def run_segmentation_on_tif(tif_path: str, lat: float, lng: float, radius_km: fl
     final_map[~mask_spatial] = -1
 
     # 6) Extraction des polygones par classe via contours OpenCV
-    #    On renvoie UNIQUEMENT 3 classes: bare_soil / crop / forest
     label_to_name = {0: "Zone nue", 1: "Zone cultivée", 2: "Zone forestière"}
     api_class_map = {"Zone nue": "bare_soil", "Zone cultivée": "crop", "Zone forestière": "forest"}
 
@@ -208,7 +232,7 @@ def run_segmentation_on_tif(tif_path: str, lat: float, lng: float, radius_km: fl
         else:
             gdf_classes[class_name] = gpd.GeoDataFrame(geometry=[], crs=f"EPSG:{EPSG_WGS84}")
 
-    # 7) Construire la FeatureCollection avec 3 features (fusionnées par classe)
+    # 7) Construire la FeatureCollection
     features_out = []
     for cname, gdf in gdf_classes.items():
         if gdf.empty:
@@ -231,10 +255,42 @@ def run_segmentation_on_tif(tif_path: str, lat: float, lng: float, radius_km: fl
 # =========================================================
 @app.post("/api/soil-segmentation", response_model=StartResp)
 def start(req: StartReq):
+    # 0) Vérifier la présence de fichiers
+    files = list_tifs()
+    if not files:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Aucun fichier GeoTIFF trouvé dans DATA_DIR='{os.environ.get('DATA_DIR','data')}'. "
+                   "Placez des .tif/.tiff dans ce dossier ou corrigez DATA_DIR."
+        )
+
+    # 1) Trouver un TIF qui couvre le point
     tif_path = find_tif_for_point(req.lat, req.lng)
     if not tif_path:
-        raise HTTPException(status_code=404, detail="Aucune image TIFF couvrant ce point.")
-    # Pour un POC synchrone, on encode les params dans le jobId
+        # Construire un message explicite listant les emprises disponibles
+        examples = []
+        for p in files[:5]:
+            try:
+                with rasterio.open(p) as src:
+                    minlon, minlat, maxlon, maxlat = bounds_wgs84(src)
+                    examples.append({
+                        "path": p,
+                        "bounds_wgs84": [round(minlon,5), round(minlat,5), round(maxlon,5), round(maxlat,5)]
+                    })
+            except Exception:
+                continue
+
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "Aucune image TIFF ne couvre le point demandé.",
+                "point_wgs84": {"lat": req.lat, "lng": req.lng},
+                "DATA_DIR": os.environ.get("DATA_DIR", "data"),
+                "fichiers_trouves": len(files),
+                "exemples_emprises": examples
+            }
+        )
+    # 2) Encodage synchrone en jobId
     job_id = json.dumps({"tif": tif_path, "lat": req.lat, "lng": req.lng, "r": req.radius_km})
     return StartResp(jobId=job_id)
 
@@ -255,7 +311,10 @@ def result(job_id: str):
         raise HTTPException(status_code=400, detail="job_id invalide")
 
     if not os.path.exists(tif):
-        raise HTTPException(status_code=404, detail="Fichier TIFF introuvable.")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Fichier TIFF introuvable côté serveur: '{tif}'."
+        )
 
     fc = run_segmentation_on_tif(tif, lat, lng, rkm)
     # S'assurer qu'on renvoie bien 3 classes max
@@ -264,9 +323,33 @@ def result(job_id: str):
 
 
 # =========================================================
+# Endpoint de debug (diagnostic rapide)
+# =========================================================
+@app.get("/api/debug/files")
+def debug_files():
+    paths = list_tifs()
+    out = []
+    for p in paths:
+        try:
+            with rasterio.open(p) as src:
+                minlon, minlat, maxlon, maxlat = bounds_wgs84(src)
+                out.append({
+                    "path": p,
+                    "crs": str(src.crs),
+                    "bounds_wgs84": [minlon, minlat, maxlon, maxlat],
+                    "bands": src.count
+                })
+        except Exception as e:
+            out.append({"path": p, "error": str(e)})
+    return {
+        "DATA_DIR": os.environ.get("DATA_DIR", "data"),
+        "count": len(paths),
+        "files": out
+    }
+
+# =========================================================
 # Lancement (dev):
 # uvicorn main:app --reload --port 8000
 # Avec data ailleurs:
 # DATA_DIR=/chemin/vers/data uvicorn main:app --reload --port 8000
 # =========================================================
-
