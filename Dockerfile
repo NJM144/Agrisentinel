@@ -27,5 +27,5 @@ ENV DATA_DIR=/app/data
 ENV PYTHONUNBUFFERED=1
 
 # Render/Heroku injectent $PORT -> on le réutilise tel quel
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
 
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
