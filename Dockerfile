@@ -1,0 +1,10 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+ENV DATA_DIR=/var/data
+# Render injecte $PORT -> on l'utilise avec sh -c
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
