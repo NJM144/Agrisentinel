@@ -31,9 +31,10 @@ app = FastAPI(title="AgroSentinel Soil Segmentation API", version="1.1")
 
 from fastapi.middleware.cors import CORSMiddleware
 
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # en prod: ['https://ton-site.fr']
+    allow_origins=["https://<ton-site>.netlify.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
